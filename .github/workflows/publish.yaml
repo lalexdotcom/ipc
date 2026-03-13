@@ -1,0 +1,83 @@
+name: Publish Package to npmjs
+on:
+  release:
+    types: [published]
+jobs:
+  release:
+    permissions:
+      # Give the default GITHUB_TOKEN write permission to commit and push the
+      # added or changed files to the repository.
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
+
+      - name: Set pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Use Node LTS ✨
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies 📦️
+        run: pnpm install --frozen-lockfile
+
+      - name: Build 🔨
+        run: pnpm build
+
+      - name: Extract version and prerelease type 📦
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+
+          # Extract prerelease type (e.g., 1.0.0-beta.1 -> beta)
+          if [[ $VERSION =~ -([a-z]+) ]]; then
+            PRERELEASE_TYPE="${BASH_REMATCH[1]}"
+          else
+            PRERELEASE_TYPE="stable"
+          fi
+          echo "type=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION, Prerelease type: $PRERELEASE_TYPE"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get latest stable release 📦
+        id: latest-stable
+        shell: bash
+        run: |
+          LATEST=$(curl -L -H "Accept: application/vnd.github+json" \
+               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+               -H "X-GitHub-Api-Version: 2022-11-28" \
+               -s "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100" | \
+            jq -r '.[] | select(.prerelease == false) | .tag_name' | head -n 1)
+          if [ -z "$LATEST" ]; then
+            LATEST="none"
+          fi
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest stable release: $LATEST"
+
+      - name: Publish package 🚀
+        shell: bash
+        run: pnpm publish --access public --no-git-checks --tag ${{ steps.version.outputs.type }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Add dist-tags if applicable 📌
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PKG_NAME="${{ github.event.repository.name }}"
+
+          if [[ "${{ steps.version.outputs.type }}" == "stable" || "${{ steps.latest-stable.outputs.version }}" == "none" ]]; then
+            npm dist-tag add "$PKG_NAME@$VERSION" latest
+          fi
+
+          if [[ "${{ steps.version.outputs.type }}" == "rc" ]]; then
+            npm dist-tag add "$PKG_NAME@$VERSION" next
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
