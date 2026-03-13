@@ -12,8 +12,11 @@ interface VersionParts {
 	patch: number;
 }
 
+const PRERELEASE_LEVELS = ['alpha', 'beta', 'rc'] as const;
+type PrereleaseLevel = typeof PRERELEASE_LEVELS[number];
+
 interface PrereleaseInfo {
-	type: 'alpha' | 'beta' | 'rc' | 'stable';
+	type: PrereleaseLevel | 'stable';
 	number: number;
 }
 
@@ -37,9 +40,9 @@ function isPrerelease(version: string): boolean {
 }
 
 // Extract prerelease type
-function getPrereleaseType(version: string): PrereleaseInfo['type'] {
+function getPrereleaseType(version: string): PrereleaseLevel | 'stable' {
 	const match = version.match(/-([a-z]+)/);
-	return (match?.[1] as PrereleaseInfo['type']) || 'stable';
+	return (match?.[1] as PrereleaseLevel) || 'stable';
 }
 
 // Extract prerelease number
@@ -48,17 +51,30 @@ function getPrereleaseNumber(version: string): number {
 	return match ? Number(match[2]) : 0;
 }
 
-// Get next prerelease level
-function getNextPrereleaseLevel(
-	current: PrereleaseInfo['type'],
-): PrereleaseInfo['type'] {
-	const levels: Record<PrereleaseInfo['type'], PrereleaseInfo['type']> = {
-		alpha: 'beta',
-		beta: 'rc',
-		rc: 'stable',
-		stable: 'alpha',
-	};
-	return levels[current];
+// Check if newVer is strictly greater than currentVer
+function isVersionGreater(newVer: string, currentVer: string): boolean {
+	const np = parseVersion(newVer);
+	const cp = parseVersion(currentVer);
+	if (np.major !== cp.major) return np.major > cp.major;
+	if (np.minor !== cp.minor) return np.minor > cp.minor;
+	if (np.patch !== cp.patch) return np.patch > cp.patch;
+	// Same base version: stable > any prerelease
+	const nt = getPrereleaseType(newVer);
+	const ct = getPrereleaseType(currentVer);
+	if (nt === 'stable' && ct !== 'stable') return true;
+	if (nt !== 'stable' && ct === 'stable') return false;
+	if (nt === 'stable' && ct === 'stable') return false;
+	// Both prerelease: compare levels then numbers
+	const ni = PRERELEASE_LEVELS.indexOf(nt as PrereleaseLevel);
+	const ci = PRERELEASE_LEVELS.indexOf(ct as PrereleaseLevel);
+	if (ni !== ci) return ni > ci;
+	return getPrereleaseNumber(newVer) > getPrereleaseNumber(currentVer);
+}
+
+// Get next prerelease level (null if already at the last level)
+function getNextPrereleaseLevel(current: PrereleaseLevel): PrereleaseLevel | null {
+	const idx = PRERELEASE_LEVELS.indexOf(current);
+	return idx < PRERELEASE_LEVELS.length - 1 ? PRERELEASE_LEVELS[idx + 1] : null;
 }
 
 // Detect the package manager name and version from the running process
@@ -139,303 +155,229 @@ async function selectManualVersion(): Promise<string> {
 	return version;
 }
 
-// Create new version based on bump type
-function createVersion(current: string, bumpType: string): string {
+// Resolve new version from CLI --bump flag
+function resolveVersionFromCLIBump(current: string, bump: string): string {
+	const [base, preid] = bump.split('+');
 	const parts = parseVersion(current);
-	const type = getPrereleaseType(current);
-	const number = getPrereleaseNumber(current);
+	const currentType = getPrereleaseType(current);
+	const currentNumber = getPrereleaseNumber(current);
 	const baseVersion = current.replace(/-.*$/, '');
+	const firstLevel = PRERELEASE_LEVELS[0];
 
-	switch (bumpType) {
-		case 'patch':
-			return `${parts.major}.${parts.minor}.${parts.patch + 1}`;
-		case 'minor':
-			return `${parts.major}.${parts.minor + 1}.0`;
-		case 'major':
-			return `${parts.major + 1}.0.0`;
-		case 'increment-prerelease':
-			return `${baseVersion}-${type}.${number + 1}`;
-		case 'next-prerelease': {
-			const nextLevel = getNextPrereleaseLevel(type);
-			return nextLevel === 'stable'
-				? baseVersion
-				: `${baseVersion}-${nextLevel}.1`;
+	if (isPrerelease(current)) {
+		switch (base) {
+			case 'patch':
+				return `${parts.major}.${parts.minor}.${parts.patch + 1}-${firstLevel}.1`;
+			case 'minor':
+				return `${parts.major}.${parts.minor + 1}.0-${firstLevel}.1`;
+			case 'major':
+				return `${parts.major + 1}.0.0-${firstLevel}.1`;
+			case 'release':
+				return baseVersion;
+			case 'prerelease': {
+				if (!preid) {
+					return `${baseVersion}-${currentType}.${currentNumber + 1}`;
+				}
+				if (preid === 'next') {
+					const currentIdx = PRERELEASE_LEVELS.indexOf(currentType as PrereleaseLevel);
+					if (currentIdx === PRERELEASE_LEVELS.length - 1) {
+						throw new Error(
+							`Cannot bump to next prerelease level: "${currentType}" is already the last level (${PRERELEASE_LEVELS.join(' → ')})`,
+						);
+					}
+					return `${baseVersion}-${PRERELEASE_LEVELS[currentIdx + 1]}.1`;
+				}
+				if (!PRERELEASE_LEVELS.includes(preid as PrereleaseLevel)) {
+					throw new Error(
+						`Unknown prerelease type: "${preid}". Valid types: ${PRERELEASE_LEVELS.join(', ')}`,
+					);
+				}
+				const targetIdx = PRERELEASE_LEVELS.indexOf(preid as PrereleaseLevel);
+				const currentIdx = PRERELEASE_LEVELS.indexOf(currentType as PrereleaseLevel);
+				if (targetIdx < currentIdx) {
+					throw new Error(
+						`Cannot regress prerelease type from "${currentType}" to "${preid}"`,
+					);
+				}
+				if (targetIdx === currentIdx) {
+					return `${baseVersion}-${currentType}.${currentNumber + 1}`;
+				}
+				return `${baseVersion}-${preid}.1`;
+			}
+			default:
+				throw new Error(`Unknown bump type: "${bump}"`);
 		}
-		case 'alpha-to-rc':
-			return `${baseVersion}-rc.1`;
-		case 'alpha-patch':
-			return `${parts.major}.${parts.minor}.${parts.patch + 1}-alpha.1`;
-		case 'alpha-minor':
-			return `${parts.major}.${parts.minor + 1}.0-alpha.1`;
-		case 'alpha-major':
-			return `${parts.major + 1}.0.0-alpha.1`;
-		case 'beta-patch':
-			return `${parts.major}.${parts.minor}.${parts.patch + 1}-beta.1`;
-		case 'beta-minor':
-			return `${parts.major}.${parts.minor + 1}.0-beta.1`;
-		case 'beta-major':
-			return `${parts.major + 1}.0.0-beta.1`;
-		case 'rc-patch':
-			return `${parts.major}.${parts.minor}.${parts.patch + 1}-rc.1`;
-		case 'rc-minor':
-			return `${parts.major}.${parts.minor + 1}.0-rc.1`;
-		case 'rc-major':
-			return `${parts.major + 1}.0.0-rc.1`;
-		case 'patch-prerelease':
-			return `${parts.major}.${parts.minor}.${parts.patch + 1}-${type}.1`;
-		case 'release':
-			return baseVersion;
-		default:
-			throw new Error(`Unknown bump type: ${bumpType}`);
+	} else {
+		switch (base) {
+			case 'patch':
+				return `${parts.major}.${parts.minor}.${parts.patch + 1}`;
+			case 'minor':
+				return `${parts.major}.${parts.minor + 1}.0`;
+			case 'major':
+				return `${parts.major + 1}.0.0`;
+			case 'release':
+				throw new Error(`Cannot use --bump release on a stable version "${current}"`);
+			case 'prerelease': {
+				if (preid === 'next') {
+					throw new Error('Cannot use --bump prerelease+next on a stable version');
+				}
+				if (preid && !PRERELEASE_LEVELS.includes(preid as PrereleaseLevel)) {
+					throw new Error(
+						`Unknown prerelease type: "${preid}". Valid types: ${PRERELEASE_LEVELS.join(', ')}`,
+					);
+				}
+				const tag = preid ?? firstLevel;
+				return `${parts.major}.${parts.minor}.${parts.patch + 1}-${tag}.1`;
+			}
+			default:
+				throw new Error(`Unknown bump type: "${bump}"`);
+		}
 	}
 }
 
-// Show menu for prerelease selection
-async function selectPrereleaseType(baseVersion: string): Promise<string> {
-	const choice = await select({
-		message: 'Select prerelease type:',
-		options: [
-			{
-				value: 'alpha',
-				label: `alpha (${baseVersion}-alpha.1)`,
-			},
-			{
-				value: 'beta',
-				label: `beta (${baseVersion}-beta.1)`,
-			},
-			{
-				value: 'rc',
-				label: `rc (${baseVersion}-rc.1)`,
-			},
-			{
-				value: 'manual',
-				label: 'Manual version',
-			},
-			{
-				value: 'back',
-				label: 'back',
-			},
-		],
-	});
-
-	if (isCancel(choice)) {
-		console.log('Released cancelled');
-		process.exit(0);
-	}
-
-	if (choice === 'back') {
-		return selectBumpType(baseVersion);
-	}
-
-	if (choice === 'manual') {
-		return await selectManualVersion();
-	}
-
-	// Now ask for the version bump type (patch, minor, major)
-	return selectPrereleaseBumpType(baseVersion, choice);
-}
-
-// Show menu for prerelease version bump type
-async function selectPrereleaseBumpType(
-	currentVersion: string,
-	prereleaseType: string,
-): Promise<string> {
+// Show bump type menu for stable versions
+async function selectBumpTypeStable(currentVersion: string): Promise<string> {
 	const parts = parseVersion(currentVersion);
-
-	const patchVersion = `${parts.major}.${parts.minor}.${parts.patch + 1}`;
-	const minorVersion = `${parts.major}.${parts.minor + 1}.0`;
-	const majorVersion = `${parts.major + 1}.0.0`;
+	const firstLevel = PRERELEASE_LEVELS[0];
+	const patchVer = `${parts.major}.${parts.minor}.${parts.patch + 1}`;
+	const minorVer = `${parts.major}.${parts.minor + 1}.0`;
+	const majorVer = `${parts.major + 1}.0.0`;
+	const preVer = `${patchVer}-${firstLevel}.1`;
 
 	const choice = await select({
-		message: 'Select version bump type for prerelease:',
+		message: 'Select version bump type:',
 		options: [
-			{
-				value: `${prereleaseType}-patch`,
-				label: `Patch (${patchVersion}-${prereleaseType}.1)`,
-			},
-			{
-				value: `${prereleaseType}-minor`,
-				label: `Minor (${minorVersion}-${prereleaseType}.1)`,
-			},
-			{
-				value: `${prereleaseType}-major`,
-				label: `Major (${majorVersion}-${prereleaseType}.1)`,
-			},
-			{
-				value: 'back',
-				label: 'back',
-			},
+			{ value: 'patch', label: `Patch     (${currentVersion} → ${patchVer})` },
+			{ value: 'minor', label: `Minor     (${currentVersion} → ${minorVer})` },
+			{ value: 'major', label: `Major     (${currentVersion} → ${majorVer})` },
+			{ value: 'prerelease', label: `Prerelease (${currentVersion} → ${preVer})` },
+			{ value: 'advanced', label: 'Advanced...' },
 		],
 	});
 
 	if (isCancel(choice)) {
-		console.log('Released cancelled');
+		console.log('Release cancelled');
 		process.exit(0);
 	}
 
-	if (choice === 'back') {
-		return selectPrereleaseType(currentVersion);
-	}
-
+	if (choice === 'advanced') return selectAdvancedMenuStable(currentVersion);
 	return choice;
 }
 
-// Show menu for version selection
+// Show advanced options for stable versions
+async function selectAdvancedMenuStable(currentVersion: string): Promise<string> {
+	const parts = parseVersion(currentVersion);
+	const patchVer = `${parts.major}.${parts.minor}.${parts.patch + 1}`;
+
+	const options: Array<{ value: string; label: string }> = PRERELEASE_LEVELS.map((level) => ({
+		value: `prerelease+${level}`,
+		label: `Prerelease ${level.padEnd(5)} (${currentVersion} → ${patchVer}-${level}.1)`,
+	}));
+	options.push({ value: 'manual', label: 'Manual version' });
+	options.push({ value: 'back', label: 'Back' });
+
+	const choice = await select({ message: 'Advanced options:', options });
+
+	if (isCancel(choice)) {
+		console.log('Release cancelled');
+		process.exit(0);
+	}
+
+	if (choice === 'back') return selectBumpTypeStable(currentVersion);
+	if (choice === 'manual') return selectManualVersion();
+	return choice;
+}
+
+// Show bump type menu for prerelease versions
+async function selectBumpTypePrerelease(currentVersion: string): Promise<string> {
+	const type = getPrereleaseType(currentVersion) as PrereleaseLevel;
+	const number = getPrereleaseNumber(currentVersion);
+	const baseVersion = currentVersion.replace(/-.*$/, '');
+	const nextLevel = getNextPrereleaseLevel(type);
+
+	const incrVer = `${baseVersion}-${type}.${number + 1}`;
+
+	const options: Array<{ value: string; label: string }> = [
+		{ value: 'prerelease', label: `Increment  (${currentVersion} → ${incrVer})` },
+	];
+
+	if (nextLevel !== null) {
+		const nextVer = `${baseVersion}-${nextLevel}.1`;
+		options.push({ value: 'prerelease+next', label: `Next level (${currentVersion} → ${nextVer})` });
+	}
+
+	options.push({ value: 'release', label: `Release    (${currentVersion} → ${baseVersion})` });
+	options.push({ value: 'advanced', label: 'Advanced...' });
+
+	const choice = await select({ message: 'Select version bump type:', options });
+
+	if (isCancel(choice)) {
+		console.log('Release cancelled');
+		process.exit(0);
+	}
+
+	if (choice === 'advanced') return selectAdvancedMenuPrerelease(currentVersion);
+	return choice;
+}
+
+// Show advanced options for prerelease versions
+async function selectAdvancedMenuPrerelease(currentVersion: string): Promise<string> {
+	const type = getPrereleaseType(currentVersion) as PrereleaseLevel;
+	const currentIdx = PRERELEASE_LEVELS.indexOf(type);
+	const baseVersion = currentVersion.replace(/-.*$/, '');
+	const parts = parseVersion(currentVersion);
+	const firstLevel = PRERELEASE_LEVELS[0];
+
+	const options: Array<{ value: string; label: string }> = [];
+
+	// Only levels strictly above current (no regression)
+	for (const level of PRERELEASE_LEVELS) {
+		if (PRERELEASE_LEVELS.indexOf(level) > currentIdx) {
+			options.push({
+				value: `prerelease+${level}`,
+				label: `Jump to ${level.padEnd(5)} (${currentVersion} → ${baseVersion}-${level}.1)`,
+			});
+		}
+	}
+
+	const patchVer = `${parts.major}.${parts.minor}.${parts.patch + 1}-${firstLevel}.1`;
+	const minorVer = `${parts.major}.${parts.minor + 1}.0-${firstLevel}.1`;
+	const majorVer = `${parts.major + 1}.0.0-${firstLevel}.1`;
+
+	options.push({ value: 'patch', label: `Patch bump (${currentVersion} → ${patchVer})` });
+	options.push({ value: 'minor', label: `Minor bump (${currentVersion} → ${minorVer})` });
+	options.push({ value: 'major', label: `Major bump (${currentVersion} → ${majorVer})` });
+	options.push({ value: 'manual', label: 'Manual version' });
+	options.push({ value: 'back', label: 'Back' });
+
+	const choice = await select({ message: 'Advanced options:', options });
+
+	if (isCancel(choice)) {
+		console.log('Release cancelled');
+		process.exit(0);
+	}
+
+	if (choice === 'back') return selectBumpTypePrerelease(currentVersion);
+	if (choice === 'manual') return selectManualVersion();
+	return choice;
+}
+
+// Show version bump menu — entry point (dispatches to stable or prerelease variant)
 async function selectBumpType(currentVersion: string): Promise<string> {
-	// In non-interactive mode, select the first option
+	// In non-interactive mode, auto-select a sensible default
 	if (!process.stdin.isTTY) {
 		if (isPrerelease(currentVersion)) {
 			const type = getPrereleaseType(currentVersion);
-			return type === 'rc' ? 'release' : 'next-prerelease';
-		} else {
-			return 'patch';
+			const isLastLevel = PRERELEASE_LEVELS.indexOf(type as PrereleaseLevel) === PRERELEASE_LEVELS.length - 1;
+			return isLastLevel ? 'release' : 'prerelease+next';
 		}
+		return 'patch';
 	}
 
 	if (isPrerelease(currentVersion)) {
-		const type = getPrereleaseType(currentVersion);
-		const number = getPrereleaseNumber(currentVersion);
-		const baseVersion = currentVersion.replace(/-.*$/, '');
-		const nextLevel = getNextPrereleaseLevel(type);
-
-		const nextPreVersion = `${baseVersion}-${type}.${number + 1}`;
-
-		const options: Array<{ value: string; label: string }> = [
-			{
-				value: 'increment-prerelease',
-				label: `${nextPreVersion} (increment)`,
-			},
-		];
-
-		if (type === 'rc') {
-			options.push({
-				value: 'release',
-				label: `${baseVersion} (release)`,
-			});
-			options.push({
-				value: 'more',
-				label: 'more...',
-			});
-		} else {
-			const nextLevelVersion = `${baseVersion}-${nextLevel}.1`;
-			options.push({
-				value: 'next-prerelease',
-				label: `${nextLevelVersion} (next level)`,
-			});
-			options.push({
-				value: 'release',
-				label: `${baseVersion} (release)`,
-			});
-			options.push({
-				value: 'more',
-				label: 'more...',
-			});
-		}
-
-		const choice = await select({
-			message: 'Select version bump type:',
-			options,
-		});
-
-		if (isCancel(choice)) {
-			console.log('Released cancelled');
-			process.exit(0);
-		}
-
-		if (choice === 'more') {
-			return selectAdvancedMenu(currentVersion);
-		}
-
-		return choice;
-	} else {
-		const patch = parseVersion(currentVersion).patch;
-		const nextPatch = `${currentVersion.slice(0, currentVersion.lastIndexOf('.'))}.${patch + 1}`;
-
-		const choice = await select({
-			message: 'Select version bump type:',
-			options: [
-				{
-					value: 'patch',
-					label: `Patch (${currentVersion} → ${nextPatch})`,
-				},
-				{
-					value: 'minor',
-					label: 'Minor',
-				},
-				{
-					value: 'major',
-					label: 'Major',
-				},
-				{
-					value: 'prerelease',
-					label: 'Prerelease',
-				},
-				{
-					value: 'manual',
-					label: 'Manual version',
-				},
-			],
-		});
-
-		if (isCancel(choice)) {
-			console.log('Released cancelled');
-			process.exit(0);
-		}
-
-		if (choice === 'prerelease') {
-			return selectPrereleaseType(currentVersion);
-		}
-
-		if (choice === 'manual') {
-			return await selectManualVersion();
-		}
-
-		return choice;
+		return selectBumpTypePrerelease(currentVersion);
 	}
-}
-
-// Show advanced menu
-async function selectAdvancedMenu(currentVersion: string): Promise<string> {
-	const type = getPrereleaseType(currentVersion);
-	const baseVersion = currentVersion.replace(/-.*$/, '');
-	const parts = parseVersion(currentVersion);
-	const nextPatch = `${parts.major}.${parts.minor}.${parts.patch + 1}`;
-	const patchVersion = `${nextPatch}-${type}.1`;
-
-	const options: Array<{ value: string; label: string }> = [
-		{
-			value: 'patch-prerelease',
-			label: `${patchVersion} (patch bump)`,
-		},
-	];
-
-	if (type === 'alpha') {
-		options.push({
-			value: 'alpha-to-rc',
-			label: `${baseVersion}-rc.1 (to RC)`,
-		});
-	}
-
-	options.push({
-		value: 'back',
-		label: 'back',
-	});
-
-	const choice = await select({
-		message: 'Advanced Options:',
-		options,
-	});
-
-	if (isCancel(choice)) {
-		console.log('Released cancelled');
-		process.exit(0);
-	}
-
-	if (choice === 'back') {
-		return selectBumpType(currentVersion);
-	}
-
-	return choice;
+	return selectBumpTypeStable(currentVersion);
 }
 
 // Main function
@@ -445,74 +387,110 @@ async function main() {
 	program
 		.name('release')
 		.description('Release script for ha-ws-js-sugar')
-		.option('--dry-run', 'Run without making changes')
+		.option('--dry-run', 'Run without making changes (implies --verbose)')
+		.option('--verbose', 'Show detailed step-by-step output')
 		.option('--tag', 'Create and push git tag')
+		.option(
+			'--bump <type>',
+			'Bump type: patch, minor, major, prerelease[+alpha|beta|rc|next], release',
+		)
+		.option('--version <version>', 'Set version explicitly (e.g. 1.2.3 or 1.2.3-alpha.1)')
+		.option('--commit', 'Auto-confirm uncommitted changes prompt')
+		.option('--ignore-pm', 'Skip updating the packageManager field')
+		.option('--no-pm', 'Remove the packageManager field')
 		.parse();
 
 	const options = program.opts();
 	const dryRun = options.dryRun === true;
+	const verbose = dryRun || options.verbose === true;
+	const log = (...args: unknown[]) => { if (verbose) console.log(...args); };
 
-	console.log(
-		dryRun ? '\n=== Release Script (DRY RUN) ===' : '\n=== Release Script ===',
-	);
-	console.log();
+	console.log(dryRun ? '\n=== Release Script (DRY RUN) ===' : '\n=== Release Script ===');
+	log();
 
 	// Step 1: Check git status
 	let hasUncommittedChanges = false;
-	if (!dryRun) {
-		try {
-			execSync('git diff-index --quiet HEAD --', { stdio: 'pipe' });
-			console.log('✓ Working directory is clean');
-		} catch {
-			hasUncommittedChanges = true;
-			console.warn('⚠ Working directory has uncommitted changes');
+	try {
+		execSync('git diff-index --quiet HEAD --', { stdio: 'pipe' });
+		log('✓ Working directory is clean');
+	} catch {
+		hasUncommittedChanges = true;
+		console.warn('⚠ Working directory has uncommitted changes');
 
-			// Ask user if they want to commit changes together
+		// Ask user if they want to commit changes together
+		let shouldCommit: boolean;
+		if (options.commit) {
+			shouldCommit = true;
+		} else {
 			const { confirm } = await import('@clack/prompts');
-			const shouldCommit = await confirm({
+			const result = await confirm({
 				message:
 					'Do you want to commit all changes together with the version bump?',
 				active: 'Yes',
 				inactive: 'No',
 			});
-
-			if (isCancel(shouldCommit)) {
-				console.log('Released cancelled');
+			if (isCancel(result)) {
+				console.log('Release cancelled');
 				process.exit(0);
 			}
-
-			if (!shouldCommit) {
-				console.error(
-					'✗ Cannot proceed with uncommitted changes. Please commit them first.',
-				);
-				process.exit(1);
-			}
-
-			console.log('✓ All changes will be committed together');
+			shouldCommit = result;
 		}
+		if (!shouldCommit) {
+			console.error(
+				'✗ Cannot proceed with uncommitted changes. Please commit them first.',
+			);
+			process.exit(1);
+		}
+		log('✓ All changes will be committed together');
 	}
 
 	// Step 2: Get current version
 	const currentVersion = getCurrentVersion();
-	console.log(`✓ Current version: ${currentVersion}`);
-	console.log();
+	log(`✓ Current version: ${currentVersion}`);
+	log();
 
-	// Step 3: Select bump type
-	const bumpType = await selectBumpType(currentVersion);
-	console.log();
+	// Step 3 & 4: Determine new version
+	let newVersion: string;
 
-	// Step 4: Calculate new version
-	// If bumpType looks like a version (contains dots), use it directly
-	const newVersion =
-		bumpType.includes('.') && /^\d+\.\d+\.\d+/.test(bumpType)
-			? bumpType
-			: createVersion(currentVersion, bumpType);
-	console.log(`✓ New version: ${currentVersion} → ${newVersion}`);
-	console.log();
+	if (options.version) {
+		const validation = validateVersion(options.version);
+		if (!validation.valid) {
+			console.error(`✗ ${validation.error}`);
+			process.exit(1);
+		}
+		newVersion = options.version;
+		log(`✓ New version: ${currentVersion} → ${newVersion}`);
+	} else if (options.bump) {
+		try {
+			newVersion = resolveVersionFromCLIBump(currentVersion, options.bump);
+			log(`✓ New version: ${currentVersion} → ${newVersion}`);
+		} catch (e) {
+			console.error(`✗ ${(e as Error).message}`);
+			process.exit(1);
+		}
+	} else {
+		// Step 3: Select bump type (interactive)
+		const bumpOrVersion = await selectBumpType(currentVersion);
+		log();
+		// Step 4: Calculate new version
+		if (/^\d+\.\d+\.\d+/.test(bumpOrVersion)) {
+			newVersion = bumpOrVersion;
+		} else {
+			newVersion = resolveVersionFromCLIBump(currentVersion, bumpOrVersion);
+		}
+		log(`✓ New version: ${currentVersion} → ${newVersion}`);
+	}
+
+	// Global regression check
+	if (!isVersionGreater(newVersion, currentVersion)) {
+		console.error(`✗ Version "${newVersion}" must be strictly greater than "${currentVersion}"`);
+		process.exit(1);
+	}
+
+	log();
 
 	// Step 5: Update version in package.json
-	console.log('→ Updating version in package.json...');
-	const packageManager = detectPackageManager();
+	log('→ Updating version in package.json...');
 	if (!dryRun) {
 		execSync(
 			`npm version ${newVersion} --no-commit-hooks --no-git-tag-version`,
@@ -520,74 +498,69 @@ async function main() {
 
 		const packagePath = path.join(process.cwd(), 'package.json');
 		const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
-		packageJson.packageManager = packageManager;
+		if (options.pm === false) {
+			delete packageJson.packageManager;
+		} else if (!options.ignorePm) {
+			packageJson.packageManager = detectPackageManager();
+		}
 		fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, '\t')}\n`);
 	}
-	console.log(`✓ packageManager set to ${packageManager}`);
+	if (options.pm === false) {
+		log('✓ packageManager field removed');
+	} else if (options.ignorePm) {
+		log('✓ packageManager field unchanged');
+	} else {
+		log(`✓ packageManager set to ${detectPackageManager()}`);
+	}
 
 	// Step 6: Commit
-	console.log('→ Committing changes...');
+	log('→ Committing changes...');
 	if (!dryRun) {
-		// If there are uncommitted changes, add all files; otherwise just add version files
 		if (hasUncommittedChanges) {
 			execSync('git add .', { stdio: 'pipe' });
-			execSync(`git commit -m "Release version ${newVersion}"`, {
-				stdio: 'pipe',
-			});
 		} else {
 			execSync('git add package.json pnpm-lock.yaml', { stdio: 'pipe' });
-			execSync(`git commit -m "Release version ${newVersion}"`, {
-				stdio: 'pipe',
-			});
 		}
+		execSync(`git commit -m "Release version ${newVersion}"`, { stdio: 'pipe' });
 	}
-	console.log('✓ Changes committed');
+	log('✓ Changes committed');
 
-	// Step 7: Create tag (if --tag flag is set)
+	// Step 7: Push + optional tag
 	if (options.tag) {
-		console.log('→ Creating git tag...');
+		log('→ Creating git tag...');
 		if (!dryRun) {
 			execSync(`git tag v${newVersion}`, { stdio: 'pipe' });
 		}
-		console.log(`✓ Tag v${newVersion} created`);
+		log(`✓ Tag v${newVersion} created`);
 
-		// Step 8: Push changes and tag
-		console.log('→ Pushing changes to remote...');
+		log('→ Pushing changes to remote...');
 		if (!dryRun) {
 			execSync('git push origin main', { stdio: 'pipe' });
 			execSync(`git push origin v${newVersion}`, { stdio: 'pipe' });
 		}
-		console.log('✓ Changes and tag pushed');
+		log('✓ Changes and tag pushed');
 	} else {
-		console.log('→ Pushing changes to remote...');
+		log('→ Pushing changes to remote...');
 		if (!dryRun) {
 			execSync('git push origin main', { stdio: 'pipe' });
 		}
-		console.log('✓ Changes pushed');
-		console.warn(
-			'⚠ Git tag not created (use --tag flag to create and push it)',
-		);
-	}
-
-	// Step 9: Summary
-	const prereleaseType = getPrereleaseType(newVersion);
-
-	if (prereleaseType !== 'stable') {
-		console.log(`\nℹ This is a ${prereleaseType} release`);
+		log('✓ Changes pushed');
+		log('⚠ Git tag not created (use --tag flag to create and push it)');
 	}
 
 	// Final summary
+	const prereleaseType = getPrereleaseType(newVersion);
+
 	console.log();
 	console.log(dryRun ? '=== Dry Run Complete ===' : '=== Release Complete ===');
-	console.log(`Version: ${newVersion}`);
+	console.log(`Version: ${currentVersion} → ${newVersion}`);
 	if (options.tag) {
-		console.log(`Tag: v${newVersion}`);
+		console.log(`Tag:     v${newVersion}`);
 	}
-
 	if (prereleaseType !== 'stable') {
-		console.log(`Type: Prerelease (${prereleaseType})`);
+		console.log(`Type:    Prerelease (${prereleaseType})`);
 	} else {
-		console.log('Type: Stable');
+		console.log('Type:    Stable');
 	}
 	console.log();
 }
