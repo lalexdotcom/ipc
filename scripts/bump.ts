@@ -61,6 +61,34 @@ function getNextPrereleaseLevel(
 	return levels[current];
 }
 
+// Detect the package manager name and version from the running process
+function detectPackageManager(): string {
+	const userAgent = process.env.npm_config_user_agent;
+	if (userAgent) {
+		// Format: "pnpm/9.1.0 npm/? node/v20.0.0 ..."
+		const match = userAgent.match(/^([\w-]+)\/([^\s]+)/);
+		if (match) {
+			return `${match[1]}@${match[2]}`;
+		}
+	}
+	// Fallback: detect via lock files
+	const cwd = process.cwd();
+	if (fs.existsSync(path.join(cwd, 'pnpm-lock.yaml'))) {
+		const version = execSync('pnpm --version', { encoding: 'utf-8' }).trim();
+		return `pnpm@${version}`;
+	}
+	if (fs.existsSync(path.join(cwd, 'yarn.lock'))) {
+		const version = execSync('yarn --version', { encoding: 'utf-8' }).trim();
+		return `yarn@${version}`;
+	}
+	if (fs.existsSync(path.join(cwd, 'bun.lockb')) || fs.existsSync(path.join(cwd, 'bun.lock'))) {
+		const version = execSync('bun --version', { encoding: 'utf-8' }).trim();
+		return `bun@${version}`;
+	}
+	const version = execSync('npm --version', { encoding: 'utf-8' }).trim();
+	return `npm@${version}`;
+}
+
 // Validate semantic version format
 function validateVersion(version: string): { valid: boolean; error?: string } {
 	// Format: x.y.z or x.y.z-prerelease.n
@@ -479,17 +507,23 @@ async function main() {
 		bumpType.includes('.') && /^\d+\.\d+\.\d+/.test(bumpType)
 			? bumpType
 			: createVersion(currentVersion, bumpType);
-	console.log(`New version: ${currentVersion} → ${newVersion}`);
+	console.log(`✓ New version: ${currentVersion} → ${newVersion}`);
 	console.log();
 
 	// Step 5: Update version in package.json
 	console.log('→ Updating version in package.json...');
+	const packageManager = detectPackageManager();
 	if (!dryRun) {
 		execSync(
-			`pnpm version ${newVersion} --no-commit-hooks --no-git-tag-version`,
+			`npm version ${newVersion} --no-commit-hooks --no-git-tag-version`,
 		);
+
+		const packagePath = path.join(process.cwd(), 'package.json');
+		const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
+		packageJson.packageManager = packageManager;
+		fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, '\t')}\n`);
 	}
-	console.log(`✓ Version updated to ${newVersion}`);
+	console.log(`✓ packageManager set to ${packageManager}`);
 
 	// Step 6: Commit
 	console.log('→ Committing changes...');
