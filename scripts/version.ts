@@ -469,7 +469,6 @@ async function selectBumpType(currentVersion: string): Promise<string> {
 // ─── Logger / template system ─────────────────────────────────────────────────
 type MessageKey =
 	| 'workingDirClean'
-	| 'uncommittedChanges'
 	| 'newVersion'
 	| 'updatingPackageJson'
 	| 'packageManagerSet'
@@ -528,7 +527,7 @@ const interactiveConfig: ModeConfig = {
 	dryRunOmit: ['updatingPackageJson', 'committing', 'creatingTag', 'pushing'],
 	log: {
 		workingDirClean: '✓ Working directory is clean',
-		newVersion: ({ from, to }) => `→ Update version from ${from} to ${to}`,
+
 		updatingPackageJson: '→ Updating version in package.json...',
 		packageManagerSet: ({ pm }) => `✓ packageManager set to ${pm}`,
 		packageManagerRemoved: '✓ packageManager field removed',
@@ -540,9 +539,7 @@ const interactiveConfig: ModeConfig = {
 		pushing: '→ Pushing to remote...',
 		pushed: ({ withTag, version }) => withTag === 'true' ? `✓ Commit and tag #v${version} pushed` : '✓ Commit pushed',
 	},
-	warn: {
-		uncommittedChanges: '⚠ Working directory has uncommitted changes',
-	},
+	warn: {},
 };
 
 const nonInteractiveConfig: ModeConfig = {
@@ -552,9 +549,7 @@ const nonInteractiveConfig: ModeConfig = {
 		summary: ({ from, to, extras }) =>
 			extras ? `${from} => ${to} (${extras})` : `${from} => ${to}`,
 	},
-	warn: {
-		uncommittedChanges: 'working directory has uncommitted changes',
-	},
+	warn: {},
 };
 
 const nonInteractiveVerboseConfig: ModeConfig = {
@@ -621,7 +616,6 @@ async function main() {
 		execSync('git diff-index --quiet HEAD --', { stdio: 'pipe' });
 	} catch {
 		hasUncommittedChanges = true;
-		warn('uncommittedChanges');
 
 		let shouldCommit: boolean;
 		if (options.commit) {
@@ -729,11 +723,9 @@ async function main() {
 
 	log('updatingPackageJson');
 	if (!dryRun) {
-		execSync(
-			`npm version ${newVersion} --no-commit-hooks --no-git-tag-version`,
-		);
 		const packagePath = path.join(process.cwd(), 'package.json');
 		const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
+		packageJson.version = newVersion;
 		if (options.pm === false) {
 			delete packageJson.packageManager;
 		} else if (!options.ignorePm) {
