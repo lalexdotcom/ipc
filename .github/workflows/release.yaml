@@ -102,7 +102,7 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          PKG_NAME="${{ github.event.repository.name }}"
+          PKG_NAME=$(grep '"name"' package.json | head -1 | sed 's/.*"name": "\(.*\)".*/\1/')
 
           if [[ "${{ steps.version.outputs.type }}" == "stable" || "${{ steps.latest-stable.outputs.version }}" == "none" ]]; then
             npm dist-tag add "$PKG_NAME@$VERSION" latest
