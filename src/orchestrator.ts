@@ -1,5 +1,4 @@
 import type { Socket } from 'node:net';
-import { json } from 'node:stream/consumers';
 //@ts-expect-error Types are wrong in @types/node-ipc package
 import { IPCModule } from 'node-ipc';
 import jsonHash from 'safe-stable-stringify';
@@ -11,7 +10,6 @@ import {
 	RESPONSE_COMMAND,
 } from './const';
 import type {
-	AddEventListenerFunction,
 	CommandResultData,
 	CommandRunData,
 	CommandsCaller,
